@@ -169,6 +169,8 @@ public class SubsamplingScaleImageView extends View {
     private int panLimit = PAN_LIMIT_INSIDE;
     // Minimum scale type
     private int minimumScaleType = SCALE_TYPE_CENTER_INSIDE;
+    // Image scaling algorithm
+    private volatile ScalingAlgorithm scalingAlgorithm = ScalingAlgorithm.BILINEAR;
     // Whether to crop borders.
     private boolean cropBorders = false;
     // Whether to decode to hardware bitmap
@@ -244,6 +246,8 @@ public class SubsamplingScaleImageView extends View {
     private OnImageEventListener onImageEventListener;
     // Scale and center listener
     private OnStateChangedListener onStateChangedListener;
+    // Scaling algorithm change listener
+    private OnScalingAlgorithmChangedListener onScalingAlgorithmChangedListener;
     // Long click listener
     private OnLongClickListener onLongClickListener;
     // Paint objects created once and reused for efficiency
@@ -2602,6 +2606,44 @@ public class SubsamplingScaleImageView extends View {
     }
 
     /**
+     * Add a listener for image scaling algorithm change. Extend {@link DefaultOnScalingAlgorithmChangedListener} to simplify
+     * implementation.
+     *
+     * @param onScalingAlgorithmChangedListener an {@link OnScalingAlgorithmChangedListener} instance.
+     */
+    public void setOnScalingAlgorithmChangedListener(OnScalingAlgorithmChangedListener onScalingAlgorithmChangedListener) {
+        this.onScalingAlgorithmChangedListener = onScalingAlgorithmChangedListener;
+    }
+
+    private void sendScalingAlgorithmChanged(int oldAlgorithm, int newAlgorithm) {
+        if (onScalingAlgorithmChangedListener != null && oldAlgorithm != newAlgorithm) {
+            onScalingAlgorithmChangedListener.onScalingAlgorithmChanged(newAlgorithm);
+        }
+    }
+
+
+    public synchronized void setScalingAlgorithm(int algorithm) {
+        //Log.d("SSIV_SET_ALGO", "Setting algorithm to " + algorithm, new Exception("STACK TRACE"));
+        Log.d("setScalingAlgorithm", "algorithm: " + algorithm);
+        Log.d("valid", "valid: " + ScalingAlgorithm.isValidCode(algorithm) + " " + algorithm + " " + scalingAlgorithm.getCode());
+        Log.d("SUBSAMPLING", "oldAlgorithm: "  + scalingAlgorithm.getCode() + " " +  "newAlgorithm: " + algorithm);
+        if (algorithm != scalingAlgorithm.getCode() && ScalingAlgorithm.isValidCode(algorithm)) {
+            sendScalingAlgorithmChanged(scalingAlgorithm.getCode(), algorithm);
+            Log.d("Setting", "algorithm: " + algorithm);
+            scalingAlgorithm = ScalingAlgorithm.NEAREST_NEIGHBOR; // Temp hardcoding for testing. This value is NOT changing to NEAREST NEIGHBOR AS IT SHOULD
+
+            invalidate();
+        }
+
+        Log.d("SUBSAMPLING", "newValue: " + scalingAlgorithm.getCode());
+    }
+
+    public int getScalingAlgorithm(int algorithm) {
+        return scalingAlgorithm.getCode();
+    }
+
+
+    /**
      * Creates a panning animation builder, that when started will animate the image to place the given coordinates of
      * the image in the center of the screen. If doing this would move the image beyond the edges of the screen, the
      * image is instead animated to move the center point as near to the center of the screen as is allowed - it's
@@ -2746,6 +2788,21 @@ public class SubsamplingScaleImageView extends View {
         void onCenterChanged(PointF newCenter, int origin);
 
     }
+
+    /**
+     * An event listener, allowing activities to be notified of scaling algorithm change events.
+     */
+    @SuppressWarnings("EmptyMethod")
+    public interface OnScalingAlgorithmChangedListener {
+
+        /**
+         * The scaling algorithm has changed.
+         *
+         * @param newAlgorithm The new algorithm to be used for scaling the images.
+         */
+        void onScalingAlgorithmChanged(int newAlgorithm);
+
+         }
 
     /**
      * Async task used to get image details without blocking the UI thread.
@@ -2971,6 +3028,16 @@ public class SubsamplingScaleImageView extends View {
         public void onScaleChanged(float newScale, int origin) {
         }
 
+    }
+
+    /**
+     * Default implementation of {@link OnScalingAlgorithmChangedListener}. This does nothing in any method.
+     */
+    public static class DefaultOnScalingAlgorithmChangedListener implements OnScalingAlgorithmChangedListener {
+
+        @Override
+        public void onScalingAlgorithmChanged(int newAlgorithm) {
+        }
     }
 
     /**
