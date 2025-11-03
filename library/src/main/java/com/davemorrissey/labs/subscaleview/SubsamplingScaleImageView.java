@@ -170,7 +170,7 @@ public class SubsamplingScaleImageView extends View {
     // Minimum scale type
     private int minimumScaleType = SCALE_TYPE_CENTER_INSIDE;
     // Image scaling algorithm
-    private volatile ScalingAlgorithm scalingAlgorithm = ScalingAlgorithm.BILINEAR;
+    private ScalingAlgorithm scalingAlgorithm = ScalingAlgorithm.BILINEAR;
     // Whether to crop borders.
     private boolean cropBorders = false;
     // Whether to decode to hardware bitmap
@@ -2615,31 +2615,24 @@ public class SubsamplingScaleImageView extends View {
         this.onScalingAlgorithmChangedListener = onScalingAlgorithmChangedListener;
     }
 
-    private void sendScalingAlgorithmChanged(int oldAlgorithm, int newAlgorithm) {
-        if (onScalingAlgorithmChangedListener != null && oldAlgorithm != newAlgorithm) {
+    private void sendScalingAlgorithmChanged(ScalingAlgorithm newAlgorithm) {
+        if (onScalingAlgorithmChangedListener != null) {
             onScalingAlgorithmChangedListener.onScalingAlgorithmChanged(newAlgorithm);
         }
     }
 
 
-    public synchronized void setScalingAlgorithm(int algorithm) {
-        //Log.d("SSIV_SET_ALGO", "Setting algorithm to " + algorithm, new Exception("STACK TRACE"));
-        Log.d("setScalingAlgorithm", "algorithm: " + algorithm);
-        Log.d("valid", "valid: " + ScalingAlgorithm.isValidCode(algorithm) + " " + algorithm + " " + scalingAlgorithm.getCode());
-        Log.d("SUBSAMPLING", "oldAlgorithm: "  + scalingAlgorithm.getCode() + " " +  "newAlgorithm: " + algorithm);
-        if (algorithm != scalingAlgorithm.getCode() && ScalingAlgorithm.isValidCode(algorithm)) {
-            sendScalingAlgorithmChanged(scalingAlgorithm.getCode(), algorithm);
-            Log.d("Setting", "algorithm: " + algorithm);
-            scalingAlgorithm = ScalingAlgorithm.NEAREST_NEIGHBOR; // Temp hardcoding for testing. This value is NOT changing to NEAREST NEIGHBOR AS IT SHOULD
+    public void setScalingAlgorithm(int algorithm) {
+        var new_algo = ScalingAlgorithm.fromCode(algorithm);
 
-            invalidate();
+        if (ScalingAlgorithm.isValidCode(algorithm)) {
+            sendScalingAlgorithmChanged(new_algo);
+            scalingAlgorithm = new_algo;
         }
-
-        Log.d("SUBSAMPLING", "newValue: " + scalingAlgorithm.getCode());
     }
 
-    public int getScalingAlgorithm(int algorithm) {
-        return scalingAlgorithm.getCode();
+    public ScalingAlgorithm getScalingAlgorithm() {
+        return scalingAlgorithm;
     }
 
 
@@ -2800,7 +2793,7 @@ public class SubsamplingScaleImageView extends View {
          *
          * @param newAlgorithm The new algorithm to be used for scaling the images.
          */
-        void onScalingAlgorithmChanged(int newAlgorithm);
+        void onScalingAlgorithmChanged(ScalingAlgorithm newAlgorithm);
 
          }
 
@@ -2828,7 +2821,11 @@ public class SubsamplingScaleImageView extends View {
                 InputProvider provider = providerRef.get();
                 if (context != null && view != null && provider == view.provider) {
                     view.debug("TilesInitTask.doInBackground");
-                    decoder = new Decoder(view.cropBorders, view.hardwareConfig, view.displayProfile.toByteArray());
+
+                    var scalingAlgorithm = view.scalingAlgorithm.getCode();
+
+                    decoder = new Decoder(view.cropBorders, view.hardwareConfig, view.displayProfile.toByteArray(), scalingAlgorithm);
+
                     Point dimensions = decoder.init(context, provider);
                     int sWidth = dimensions.x;
                     int sHeight = dimensions.y;
@@ -3036,7 +3033,7 @@ public class SubsamplingScaleImageView extends View {
     public static class DefaultOnScalingAlgorithmChangedListener implements OnScalingAlgorithmChangedListener {
 
         @Override
-        public void onScalingAlgorithmChanged(int newAlgorithm) {
+        public void onScalingAlgorithmChanged(ScalingAlgorithm newAlgorithm) {
         }
     }
 
