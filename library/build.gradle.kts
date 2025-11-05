@@ -8,6 +8,10 @@ android {
     namespace = "com.davemorrissey.labs.subscaleview"
     compileSdk = 34
 
+    publishing {
+        singleVariant("release") {}
+    }
+
     defaultConfig {
         minSdk = 21
 

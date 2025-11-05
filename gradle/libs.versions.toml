@@ -1,6 +1,6 @@
 [plugins]
 android-library = { id = "com.android.library", version = "8.13.0" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version = "1.9.23" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version = "2.2.21" }
 
 [libraries]
 androidx-annotation = { module = "androidx.annotation:annotation", version = "1.7.1" }

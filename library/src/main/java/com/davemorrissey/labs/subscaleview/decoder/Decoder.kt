@@ -9,11 +9,13 @@ import android.util.Log
 import com.davemorrissey.labs.subscaleview.provider.InputProvider
 import tachiyomi.decoder.ImageDecoder
 import tachiyomi.decoder.ImageDecoder.Companion.newInstance
+import tachiyomi.decoder.ScalingAlgorithm
 
 class Decoder(
     private val cropBorders: Boolean,
     private val hardwareConfig: Boolean,
     private val displayProfile: ByteArray,
+    private val scalingAlgorithm: ScalingAlgorithm
 ) : ImageRegionDecoder {
 
     private var decoder: ImageDecoder? = null
@@ -54,6 +56,13 @@ class Decoder(
      * @return The decoded region. It is safe to return null if decoding fails.
      */
     override fun decodeRegion(sRect: Rect, sampleSize: Int): Bitmap {
+        try {
+            ImageDecoder.setNativeScalingAlgorithm(scalingAlgorithm.code)
+        } catch (_: Throwable) {
+        }
+
+        Log.d("Decoder", sampleSize.toString());
+
         var bitmap = decoder?.decode(sRect, sampleSize)
         check(bitmap != null) { "Failed to decode region" }
         if (hardwareConfig && Build.VERSION.SDK_INT >= 26) {

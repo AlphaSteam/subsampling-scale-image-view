@@ -44,6 +44,8 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import tachiyomi.decoder.ScalingAlgorithm;
+
 /**
  * <p>
  * Displays an image subsampled as necessary to avoid loading too much image data into memory. After zooming in,
@@ -170,7 +172,7 @@ public class SubsamplingScaleImageView extends View {
     // Minimum scale type
     private int minimumScaleType = SCALE_TYPE_CENTER_INSIDE;
     // Image scaling algorithm
-    private ScalingAlgorithm scalingAlgorithm = ScalingAlgorithm.BILINEAR;
+    private ScalingAlgorithm scalingAlgorithm = ScalingAlgorithm.DEFAULT;
     // Whether to crop borders.
     private boolean cropBorders = false;
     // Whether to decode to hardware bitmap
@@ -2822,9 +2824,10 @@ public class SubsamplingScaleImageView extends View {
                 if (context != null && view != null && provider == view.provider) {
                     view.debug("TilesInitTask.doInBackground");
 
-                    var scalingAlgorithm = view.scalingAlgorithm.getCode();
-
-                    decoder = new Decoder(view.cropBorders, view.hardwareConfig, view.displayProfile.toByteArray(), scalingAlgorithm);
+                    decoder = new Decoder(view.cropBorders,
+                                          view.hardwareConfig,
+                                          view.displayProfile.toByteArray(),
+                                          view.scalingAlgorithm);
 
                     Point dimensions = decoder.init(context, provider);
                     int sWidth = dimensions.x;
@@ -2847,6 +2850,7 @@ public class SubsamplingScaleImageView extends View {
         }
 
         @Override
+        @SuppressWarnings("deprecation")
         protected void onPostExecute(int[] xy) {
             final SubsamplingScaleImageView view = viewRef.get();
             final InputProvider provider = providerRef.get();
@@ -2877,6 +2881,7 @@ public class SubsamplingScaleImageView extends View {
         }
 
         @Override
+        @SuppressWarnings("deprecation")
         protected Bitmap doInBackground(Void... params) {
             try {
                 SubsamplingScaleImageView view = viewRef.get();
@@ -2913,6 +2918,7 @@ public class SubsamplingScaleImageView extends View {
         }
 
         @Override
+        @SuppressWarnings("deprecation")
         protected void onPostExecute(Bitmap bitmap) {
             final SubsamplingScaleImageView subsamplingScaleImageView = viewRef.get();
             final Tile tile = tileRef.get();

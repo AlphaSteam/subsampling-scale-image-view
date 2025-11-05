@@ -24,6 +24,8 @@ dependencyResolutionManagement {
     }
 }
 
+rootProject.name = "subsampling-scale-image-view"
+
 listOf("library", "sample").forEach {
     include(":$it")
 }
