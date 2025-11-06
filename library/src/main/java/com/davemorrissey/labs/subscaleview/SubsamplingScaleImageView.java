@@ -45,6 +45,7 @@ import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import tachiyomi.decoder.ScalingAlgorithm;
+import tachiyomi.decoder.ResamplerManager;
 
 /**
  * <p>
@@ -162,7 +163,7 @@ public class SubsamplingScaleImageView extends View {
     // Map of zoom level to tile grid
     private Map<Integer, List<Tile>> tileMap;
     // Overlay tile boundaries and other info
-    private boolean debug = false;
+    private boolean debug = true;
     // Max scale allowed (prevent infinite zoom)
     private float maxScale = 2F;
     // Density to reach before loading higher resolution tiles
@@ -257,6 +258,10 @@ public class SubsamplingScaleImageView extends View {
     private Paint debugTextPaint;
     private Paint debugLinePaint;
     private Paint tileBgPaint;
+    // When true, allow Canvas to apply bitmap filtering (bilinear) when drawing.
+    // Default false to preserve resampled bitmap quality. TODO: expose in user settings/preferences.
+    private boolean useCanvasFiltering = false;
+    // Diagnostic fields (updated during tile load/draw) to aid debugging of resampling vs draw filtering
     // Volatile fields used to reduce object creation
     private ScaleAndTranslate satTemp;
     private Matrix matrix;
@@ -969,7 +974,10 @@ public class SubsamplingScaleImageView extends View {
                 if (tileMapEntry.getKey() == sampleSize || hasMissingTiles) {
                     for (Tile tile : tileMapEntry.getValue()) {
                         sourceToViewRect(tile.sRect, tile.vRect);
-                        if (!tile.loading && tile.bitmap != null) {
+                        // Draw existing bitmap even while a replacement load is in progress. Hiding
+                        // the bitmap when tile.loading==true causes transient blank frames when
+                        // many tiles start loading simultaneously during gestures.
+                        if (tile.bitmap != null) {
                             if (tileBgPaint != null) {
                                 canvas.drawRect(tile.vRect, tileBgPaint);
                             }
@@ -990,11 +998,33 @@ public class SubsamplingScaleImageView extends View {
                                         setMatrixArray(dstArray, tile.vRect.left, tile.vRect.bottom, tile.vRect.left, tile.vRect.top, tile.vRect.right, tile.vRect.top, tile.vRect.right, tile.vRect.bottom);
                             }
                             matrix.setPolyToPoly(srcArray, 0, dstArray, 0, 4);
+                            // Respect chosen scaling algorithm and current canvas filtering flag.
+                            try {
+                                if (bitmapPaint != null) {
+                                    boolean filter = useCanvasFiltering && getScalingAlgorithm() == tachiyomi.decoder.ScalingAlgorithm.BILINEAR;
+                                    bitmapPaint.setFilterBitmap(filter);
+                                }
+                            } catch (Throwable ignored) {
+                            }
+
+                            // Compute and store the draw scale for this tile (view pixels per bitmap pixel)
+                            try {
+                                if (tile.bitmap != null && tile.vRect != null) {
+                                    float drawScale = (float) tile.vRect.width() / (float) tile.bitmap.getWidth();
+                                }
+                            } catch (Throwable ignored) {
+                            }
+
                             canvas.drawBitmap(tile.bitmap, matrix, bitmapPaint);
                             if (debug) {
                                 canvas.drawRect(tile.vRect, debugLinePaint);
+                                if (tile.loading) {
+                                    // Draw a subtle loading hint without hiding the bitmap.
+                                    canvas.drawText("LOADING", tile.vRect.left + px(5), tile.vRect.top + px(35), debugTextPaint);
+                                }
                             }
                         } else if (tile.loading && debug) {
+                            // If there's no bitmap at all, and the tile is loading, show LOADING.
                             canvas.drawText("LOADING", tile.vRect.left + px(5), tile.vRect.top + px(35), debugTextPaint);
                         }
                         if (tile.visible && debug) {
@@ -1029,6 +1059,14 @@ public class SubsamplingScaleImageView extends View {
                 sRect.set(0f, 0f, sWidth, sHeight);
                 matrix.mapRect(sRect);
                 canvas.drawRect(sRect, tileBgPaint);
+            }
+            // Respect chosen scaling algorithm when drawing full bitmap too.
+            try {
+                if (bitmapPaint != null) {
+                    boolean filter = useCanvasFiltering && getScalingAlgorithm() == tachiyomi.decoder.ScalingAlgorithm.BILINEAR;
+                    bitmapPaint.setFilterBitmap(filter);
+                }
+            } catch (Throwable ignored) {
             }
             canvas.drawBitmap(bitmap, matrix, bitmapPaint);
 
@@ -1150,7 +1188,12 @@ public class SubsamplingScaleImageView extends View {
         if (bitmapPaint == null) {
             bitmapPaint = new Paint();
             bitmapPaint.setAntiAlias(true);
-            bitmapPaint.setFilterBitmap(true);
+            // Default to respecting the runtime flag and current algorithm.
+            try {
+                bitmapPaint.setFilterBitmap(useCanvasFiltering && getScalingAlgorithm() == tachiyomi.decoder.ScalingAlgorithm.BILINEAR);
+            } catch (Throwable ignored) {
+                bitmapPaint.setFilterBitmap(false);
+            }
             bitmapPaint.setDither(true);
         }
         if ((debugTextPaint == null || debugLinePaint == null) && debug) {
@@ -1221,9 +1264,49 @@ public class SubsamplingScaleImageView extends View {
                 if (tile.sampleSize == sampleSize) {
                     if (tileVisible(tile)) {
                         tile.visible = true;
-                        if (!tile.loading && tile.bitmap == null && load) {
-                            TileLoadTask task = new TileLoadTask(this, decoder, tile);
-                            execute(task);
+                        if (!tile.loading) {
+                            if (tile.bitmap == null && load) {
+                                TileLoadTask task = new TileLoadTask(this, decoder, tile);
+                                execute(task);
+                            } else if (tile.bitmap != null && load) {
+                                // If we have a bitmap but it's smaller than the on-screen rect (needs upscaling),
+                                // request a reload so the resampler can produce an upscaled bitmap (improves quality when zooming in).
+                                try {
+                                    // Ensure vRect is up-to-date for this tile
+                                    sourceToViewRect(tile.sRect, tile.vRect);
+                                    int desiredW = Math.max(1, tile.vRect.width());
+                                    int desiredH = Math.max(1, tile.vRect.height());
+                                    if (tile.bitmap.getWidth() < desiredW || tile.bitmap.getHeight() < desiredH) {
+                                        // If the user is actively panning/zooming, don't schedule upscales yet.
+                                        // We'll wait for the gesture to finish and then request replacements so
+                                        // we avoid thrashing and transient blank frames.
+                                        if (isZooming || isPanning || isQuickScaling) {
+                                            continue;
+                                        }
+                                        // Debounce reloads during gestures to avoid transient states where no
+                                        // drawable tiles exist (which can cause the view to draw nothing).
+                                        // Schedule a slightly delayed reload so rapid pan/zoom doesn't thrash.
+                                        try {
+                                            // Create the task only when the delayed Runnable runs so we don't
+                                            // mark the tile as loading immediately and hide it from draw.
+                                            handler.postDelayed(() -> {
+                                                try {
+                                                    TileLoadTask task = new TileLoadTask(this, decoder, tile);
+                                                    execute(task);
+                                                } catch (Throwable t) {
+                                                    // If creating the task fails at runtime, log and ignore.
+                                                    Log.w(TAG, "Delayed TileLoadTask creation failed", t);
+                                                }
+                                            }, 200);
+                                        } catch (Throwable ignored) {
+                                            // Fallback to immediate load if handler unavailable
+                                            TileLoadTask task = new TileLoadTask(this, decoder, tile);
+                                            execute(task);
+                                        }
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                            }
                         }
                     } else if (tile.sampleSize != fullImageSampleSize) {
                         tile.visible = false;
@@ -2562,6 +2645,24 @@ public class SubsamplingScaleImageView extends View {
     }
 
     /**
+     * Enable or disable Canvas bitmap filtering (bilinear) when drawing bitmaps.
+     * Default is false to preserve high-quality resampler output. When enabled, filtering
+     * will only be applied for BILINEAR algorithm selection.
+     *
+     * TODO: expose this option in user settings/preferences.
+     */
+    public void setUseCanvasFiltering(boolean useCanvasFiltering) {
+        this.useCanvasFiltering = useCanvasFiltering;
+        // repaint so the paint flag takes effect immediately
+        invalidate();
+    }
+
+    /** Returns whether Canvas bitmap filtering is enabled. */
+    public boolean isUseCanvasFiltering() {
+        return useCanvasFiltering;
+    }
+
+    /**
      * Check if an image has been set. The image may not have been loaded and displayed yet.
      *
      * @return If an image is currently set.
@@ -2809,6 +2910,7 @@ public class SubsamplingScaleImageView extends View {
         private ImageRegionDecoder decoder;
         private Exception exception;
 
+        @SuppressWarnings("deprecation")
         TilesInitTask(SubsamplingScaleImageView view, Context context, InputProvider provider) {
             this.viewRef = new WeakReference<>(view);
             this.contextRef = new WeakReference<>(context);
@@ -2816,6 +2918,7 @@ public class SubsamplingScaleImageView extends View {
         }
 
         @Override
+        @SuppressWarnings("deprecation")
         protected int[] doInBackground(Void... params) {
             try {
                 Context context = contextRef.get();
@@ -2873,6 +2976,7 @@ public class SubsamplingScaleImageView extends View {
         private final WeakReference<Tile> tileRef;
         private Exception exception;
 
+        @SuppressWarnings("deprecation")
         TileLoadTask(SubsamplingScaleImageView view, ImageRegionDecoder decoder, Tile tile) {
             this.viewRef = new WeakReference<>(view);
             this.decoderRef = new WeakReference<>(decoder);
@@ -2892,12 +2996,156 @@ public class SubsamplingScaleImageView extends View {
                     view.decoderLock.readLock().lock();
                     try {
                         if (decoder.isReady()) {
-                            // Update tile's file sRect according to rotation
                             view.fileSRect(tile.sRect, tile.fileSRect);
                             if (view.sRegion != null) {
                                 tile.fileSRect.offset(view.sRegion.left, view.sRegion.top);
                             }
-                            return decoder.decodeRegion(tile.fileSRect, tile.sampleSize);
+                            Bitmap decoded = decoder.decodeRegion(tile.fileSRect, tile.sampleSize);
+
+                            try {
+                                if (decoded.getConfig() != Bitmap.Config.ARGB_8888) {
+                                    Bitmap copy = decoded.copy(Bitmap.Config.ARGB_8888, true);
+                                    if (copy != null) {
+                                        decoded.recycle();
+                                        decoded = copy;
+                                    }
+                                }
+
+                                int inW = decoded.getWidth();
+                                int inH = decoded.getHeight();
+                                final int channels = 4;
+
+                                int[] pixels = new int[inW * inH];
+                                decoded.getPixels(pixels, 0, inW, 0, 0, inW, inH);
+                                byte[] input = new byte[inW * inH * channels];
+                                for (int i = 0; i < pixels.length; i++) {
+                                    int p = pixels[i];
+                                    input[i * 4] = (byte) ((p >> 16) & 0xFF);
+                                    input[i * 4 + 1] = (byte) ((p >> 8) & 0xFF);
+                                    input[i * 4 + 2] = (byte) (p & 0xFF);
+                                    input[i * 4 + 3] = (byte) ((p >> 24) & 0xFF);
+                                }
+
+                                // Small diagnostic dump of first few pixels to help debug color/ordering issues.
+                                try {
+                                    int previewCount = Math.min(8, inW * inH);
+                                    StringBuilder inPreview = new StringBuilder();
+                                    for (int i = 0; i < previewCount; i++) {
+                                        int r = input[i * 4] & 0xFF;
+                                        int g = input[i * 4 + 1] & 0xFF;
+                                        int b = input[i * 4 + 2] & 0xFF;
+                                        int a = input[i * 4 + 3] & 0xFF;
+                                        inPreview.append(String.format("[%d:%d,%d,%d,%d]", i, r, g, b, a));
+                                    }
+                                    Log.d(TAG, "Tile input preview: " + inPreview.toString());
+                                } catch (Throwable t) {
+                                    // Ignore debug preview errors
+                                }
+
+                                int algCode = view.getScalingAlgorithm() != null ? view.getScalingAlgorithm().getCode() : ScalingAlgorithm.DEFAULT.getCode();
+
+                                try {
+                                    tachiyomi.decoder.Resampler res = tachiyomi.decoder.ResamplerManager.INSTANCE.get();
+
+
+                                    int targetW;
+                                    int targetH;
+                                    float viewScale = 1.0f;
+                                    try {
+                                        viewScale = view.getScale();
+                                    } catch (Throwable ignored) {
+                                    }
+
+                                    if (viewScale <= 1.0f) {
+                                        // No need to upscale when not zoomed in; keep original dimensions.
+                                        targetW = inW;
+                                        targetH = inH;
+                                        Log.d(TAG, "Not upscaling: viewScale=" + viewScale + ", using inW/inH=" + inW + "x" + inH);
+                                    } else {
+                                        // Try to compute the on-screen size of the tile using float mapping.
+                                        try {
+                                            float leftF = view.sourceToViewX(tile.sRect.left);
+                                            float rightF = view.sourceToViewX(tile.sRect.right);
+                                            float topF = view.sourceToViewY(tile.sRect.top);
+                                            float bottomF = view.sourceToViewY(tile.sRect.bottom);
+                                            int w = Math.max(1, Math.round(Math.abs(rightF - leftF)));
+                                            int h = Math.max(1, Math.round(Math.abs(bottomF - topF)));
+
+                                            targetW = Math.max(inW, w);
+                                            targetH = Math.max(inH, h);
+                                            Log.d(TAG, "Computed upscale target from sourceToView: " + targetW + "x" + targetH + " for sRect=" + tile.sRect);
+
+                                        } catch (Throwable t) {
+                                            targetW = Math.max(inW, Math.max(1, Math.round(inW * Math.min(viewScale, 5.0f))));
+                                            targetH = Math.max(inH, Math.max(1, Math.round(inH * Math.min(viewScale, 5.0f))));
+                                            Log.d(TAG, "Fallback upscale target from inW*viewScale in catch: " + targetW + "x" + targetH);
+                                        }
+                                    }
+
+                                    // Limit upscales to avoid huge allocations/crashes.
+                                    // 1) Cap per-dimension upscale factor (avoid extremely large X/Y even if total pixels under cap)
+                                    final float maxUpscaleFactor = 4.0f; // don't upscale more than 4x per dimension
+                                    int maxByFactorW = Math.max(inW, Math.round(inW * maxUpscaleFactor));
+                                    int maxByFactorH = Math.max(inH, Math.round(inH * maxUpscaleFactor));
+                                    if (targetW > maxByFactorW || targetH > maxByFactorH) {
+                                        int oldW = targetW;
+                                        int oldH = targetH;
+                                        targetW = Math.min(targetW, maxByFactorW);
+                                        targetH = Math.min(targetH, maxByFactorH);
+                                        Log.d(TAG, "Capping upscale factor from " + oldW + "x" + oldH + " to " + targetW + "x" + targetH);
+                                    }
+
+                                    // 2) Cap large upscales by total pixel budget to avoid OOM on low-memory devices.
+                                    // Allow up to ~64MB of pixel data (for 4 channels): ~16,777,216 pixels.
+                                    int maxPixels = 16_777_216;
+                                    long requestedPixels = (long) targetW * (long) targetH;
+                                    if (requestedPixels > maxPixels) {
+                                        double scale = Math.sqrt(maxPixels / (double) requestedPixels);
+                                        int cappedW = Math.max(inW, Math.max(1, (int) Math.round(targetW * scale)));
+                                        int cappedH = Math.max(inH, Math.max(1, (int) Math.round(targetH * scale)));
+                                        Log.d(TAG, "Capping upscale target from " + targetW + "x" + targetH + " to " + cappedW + "x" + cappedH + " to avoid OOM");
+                                        targetW = cappedW;
+                                        targetH = cappedH;
+                                    }
+
+                                    // Call the resampler.
+                                    byte[] out = null;
+                                    try {
+                                        out = res.resize(input, inW, inH, channels, targetW, targetH, algCode);
+                                    } catch (Throwable t) {
+                                        Log.w(TAG, "Resampler threw during resize call", t);
+                                    }
+
+                                    // If output buffer matches expected size, convert to Bitmap of the target size.
+                                    if (out != null) {
+                                        int expectedLen = targetW * targetH * channels;
+                                        if (out.length == expectedLen) {
+                                            int[] outPixels = new int[targetW * targetH];
+                                            for (int i = 0; i < outPixels.length; i++) {
+                                                int r = out[i * 4] & 0xFF;
+                                                int g = out[i * 4 + 1] & 0xFF;
+                                                int b = out[i * 4 + 2] & 0xFF;
+                                                int a = out[i * 4 + 3] & 0xFF;
+                                                outPixels[i] = (a << 24) | (r << 16) | (g << 8) | b;
+                                            }
+                                            Bitmap outBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888);
+                                            outBitmap.setPixels(outPixels, 0, targetW, 0, 0, targetW, targetH);
+                                            decoded.recycle();
+                                            decoded = outBitmap;
+                                        } else {
+                                            Log.w(TAG, "Resampler returned buffer length mismatch: got=" + out.length + " expected=" + expectedLen);
+                                        }
+                                    }
+                                } catch (Throwable t) {
+                                    Log.w(TAG, "Resampler call threw", t);
+                                }
+                            } catch (OutOfMemoryError oom) {
+                                Log.w(TAG, "Resampler OOM - falling back to decoded bitmap", oom);
+                            } catch (Throwable t) {
+                                Log.w(TAG, "Resampler failure - falling back to decoded bitmap", t);
+                            }
+
+                            return decoded;
                         } else {
                             tile.loading = false;
                         }
